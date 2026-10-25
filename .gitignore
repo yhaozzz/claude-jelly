@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境（uv 会在本机创建）
+.venv/
+
+# 编辑器
+.idea/
+.vscode/
+
+# 本机运行产物
+*.log
+preview*.png
+
+# 工具缓存
+.ruff_cache/

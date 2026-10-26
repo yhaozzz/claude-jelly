@@ -61,6 +61,9 @@ SPRITE_CY = 82.0
 # 精灵图里伞盖（脑袋）占的高度比例，224/280 处是触手开始的接缝
 SPRITE_HEAD_FRAC = 224.0 / 280.0
 
+# 终端窗口存在（显示中或已收起）都算 Claude Code 在运行，一律吐泡泡
+RUNNING_STATES = ("visible", "hidden")
+
 # ---- 泡泡出泡点（相对 SPRITE_CY 的纵向偏移，逻辑像素）----
 BUBBLE_EXIT_OFFSET = -14.0     # 正常：伞盖中上部侧面
 BUBBLE_EXIT_OFFSET_LOW = 18.0  # 贴着屏幕上边缘：改到身体下半部，否则刚冒出来就被裁掉
@@ -108,7 +111,8 @@ BUBBLE_COUNT = 5
 def _draw_bubbles(
     ov: Image.Image, k: float, t: float, direction: int, low: bool = False
 ) -> None:
-    """终端窗口显示时从水母侧面吐泡泡，direction=-1 向左、+1 向右。
+    """Claude Code 运行时从水母侧面吐泡泡（窗口显示或收起都一样），
+    direction=-1 向左、+1 向右。
 
     粒子只由时间 t 决定（无状态），每帧之间连续。泡泡在水母外侧淡入，
     沿一条向上的轨迹飘走，和水母身体之间留有空隙。
@@ -199,7 +203,7 @@ def draw_sprite_frame(
     body_hidden=True 时只画伞盖（脑袋），触手整段裁掉，
     用来做“躲在屏幕边缘只露脑袋”的效果。
     bubble_low=True 时泡泡从身体下半部出发（贴着屏幕上边缘时用）。
-    hang_sway=True 时挂着晃触手（贴在上边缘、终端正在显示时的彩蛋）。
+    hang_sway=True 时挂着晃触手（贴在上边缘、Claude Code 正在运行时的彩蛋）。
     """
     k = scale * SS
     W = max(1, int(round(BASE_W * scale)))
@@ -211,7 +215,7 @@ def draw_sprite_frame(
     d = ImageDraw.Draw(img)
 
     # 泡泡先画在底层：从伞盖后面淡入，再露出身体轮廓
-    if state == "visible" and bubble_dir:
+    if state in RUNNING_STATES and bubble_dir:
         ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         _draw_bubbles(ov, k, t, bubble_dir, bubble_low)
         img.alpha_composite(ov)
@@ -233,14 +237,9 @@ def draw_sprite_frame(
         img.alpha_composite(sp, (int(round(cx - tw / 2.0)), int(round(cy - th / 2.0))))
 
     # ---- 状态灯 ----
-    # "visible"（终端窗口正显示）改用吐泡泡表示，避免贴边时指示灯被切出屏幕
-    if state in ("launching", "error", "hidden"):
-        if state == "launching":
-            dot = (242, 173, 74, 255)
-        elif state == "error":
-            dot = (222, 92, 82, 255)
-        else:
-            dot = (96, 196, 142, 255)
+    # 终端在运行（显示或收起）时改用吐泡泡表示，这里只保留启动中 / 启动失败
+    if state in ("launching", "error"):
+        dot = (242, 173, 74, 255) if state == "launching" else (222, 92, 82, 255)
         side = bubble_dir if bubble_dir else 1
         dot_x = (JELLY_CX + side * (SPRITE_BASE_W / 2.0 - 5.0)) * k
         dot_y = (SPRITE_CY - bh / 2.0 + 6.0) * k
@@ -314,7 +313,7 @@ def draw_frame(
     od = ImageDraw.Draw(ov)
 
     # 泡泡在下层，从身体后面淡入
-    if state == "visible" and bubble_dir:
+    if state in RUNNING_STATES and bubble_dir:
         bub = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         _draw_bubbles(bub, k, t, bubble_dir, bubble_low)
         img.alpha_composite(bub)
@@ -455,16 +454,11 @@ def draw_frame(
     )
 
     # ---- 状态灯 ----
-    # "visible"（终端窗口正显示）改用吐泡泡表示
-    if state in ("launching", "error", "hidden"):
+    # 终端在运行时用吐泡泡表示，这里只保留启动中 / 启动失败
+    if state in ("launching", "error"):
         side = bubble_dir if bubble_dir else 1
         dot_x, dot_y = cx + side * rx * 0.78, cy - ry * 0.72
-        if state == "launching":
-            dot = (242, 173, 74, 255)
-        elif state == "error":
-            dot = (222, 92, 82, 255)
-        else:
-            dot = (96, 196, 142, 255)
+        dot = (242, 173, 74, 255) if state == "launching" else (222, 92, 82, 255)
         od.ellipse(
             [pt(dot_x - 3.6, dot_y - 3.6), pt(dot_x + 3.6, dot_y + 3.6)],
             fill=(255, 255, 255, 210),

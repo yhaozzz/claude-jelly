@@ -55,6 +55,7 @@ from .render import (
     EDGE_PEEK_TOP,
     EDGE_SNAP_RADIUS,
     REDOCK_DELAY,
+    RUNNING_STATES,
     SPRITE_CY,
     body_rect,
     clear_sprite_cache,
@@ -357,7 +358,7 @@ class JellyApp:
             return
         t = (time.monotonic() - self.t0) * self.float_speed + self.anim_offset
         state = self._state()
-        # 贴在上边缘：不吐泡泡，改成挂着晃触手（终端在显示时才晃）
+        # 贴在上边缘：不吐泡泡，改成挂着晃触手（Claude Code 在运行时才晃）
         hanging = self.dock_edge == "top"
         img, tip_rect = draw_frame(
             self.scale, t, self.hover, self.tip_shown and self.show_tip,
@@ -365,7 +366,7 @@ class JellyApp:
             self.hidden and not hanging,
             0 if hanging else self._focus_side(),
             self._bubble_low(),
-            hanging and state == "visible",
+            hanging and state in RUNNING_STATES,
         )
         img = self._clip_to_work_area(img)
         if img.size != (self.dib_w, self.dib_h):

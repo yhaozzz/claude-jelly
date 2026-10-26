@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import traceback
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -76,6 +77,7 @@ EDGE_PEEK_SIDE = 0.375    # 左右边缘：约 1/3 的身体藏在屏幕外，�
 EDGE_PEEK_TOP = 0.20      # 顶边少藏一点，避免把眼睛切掉
 REDOCK_DELAY = 0.5        # 鼠标离开后延迟多久重新躲回去（秒）
 
+_sprite_path: Path | None = None  # None 表示默认水母
 _sprite_src: Image.Image | None = None
 _sprite_loaded = False
 _sprite_scaled: dict[tuple[int, int], Image.Image] = {}
@@ -85,13 +87,72 @@ def _load_sprite() -> Image.Image | None:
     global _sprite_src, _sprite_loaded
     if not _sprite_loaded:
         _sprite_loaded = True
+        path = _sprite_path or SPRITE_PATH
         try:
-            if SPRITE_PATH.exists():
-                _sprite_src = Image.open(SPRITE_PATH).convert("RGBA")
+            if path.exists():
+                with Image.open(path) as im:
+                    img = im.convert("RGBA")
+                # 自定义图片可能非常大，先缩到合理尺寸，避免每帧缩放太慢
+                if max(img.size) > 1024:
+                    img.thumbnail((1024, 1024), Image.LANCZOS)
+                # 全透明的图片会让水母点不到，直接当作加载失败
+                max_alpha = img.getchannel("A").getextrema()[1]
+                if _sprite_path is not None and max_alpha < 80:
+                    raise ValueError("sprite is fully transparent")
+                _sprite_src = img
         except Exception:
             log("load sprite failed\n" + traceback.format_exc())
             _sprite_src = None
     return _sprite_src
+
+
+def set_sprite_image(path: str | Path | None) -> bool:
+    """切换悬浮形象：path=None 恢复默认水母，返回是否加载成功。"""
+    global _sprite_path, _sprite_src, _sprite_loaded
+    previous = _sprite_path
+    _sprite_path = Path(path) if path else None
+    _sprite_src = None
+    _sprite_loaded = False
+    _sprite_scaled.clear()
+    if _load_sprite() is not None:
+        return True
+    # 图片打不开：回滚到原来的形象
+    _sprite_path = previous
+    _sprite_src = None
+    _sprite_loaded = False
+    _sprite_scaled.clear()
+    _load_sprite()
+    return False
+
+
+def is_custom_sprite() -> bool:
+    """当前是否使用自定义图片（而非默认像素水母）。"""
+    return _sprite_path is not None
+
+
+def _sprite_cy() -> float:
+    """形象中心在画布中的纵向位置（逻辑像素）。"""
+    return SPRITE_CY if _sprite_path is None else BASE_H / 2.0
+
+
+def _display_size(sprite: Image.Image, hover: bool) -> tuple[float, float]:
+    """图片在画布上的显示宽高（逻辑像素）。
+
+    默认水母沿用固定宽度；自定义图片等比缩放到水母身体框内。
+    """
+    grow = 1.045 if hover else 1.0
+    ratio = sprite.width / sprite.height if sprite.height else 1.0
+    if _sprite_path is None:
+        bw = SPRITE_BASE_W * grow
+        return bw, bw / ratio
+    max_w, max_h = BODY_W * grow, BODY_H * grow
+    if max_w / max_h > ratio:
+        bh = max_h
+        bw = bh * ratio
+    else:
+        bw = max_w
+        bh = bw / ratio
+    return bw, bh
 
 
 def _scaled_sprite(tw: int, th: int) -> Image.Image | None:
@@ -109,7 +170,12 @@ BUBBLE_COUNT = 5
 
 
 def _draw_bubbles(
-    ov: Image.Image, k: float, t: float, direction: int, low: bool = False
+    ov: Image.Image,
+    k: float,
+    t: float,
+    direction: int,
+    low: bool = False,
+    body_w: float = SPRITE_BASE_W,
 ) -> None:
     """Claude Code 运行时从水母侧面吐泡泡（窗口显示或收起都一样），
     direction=-1 向左、+1 向右。
@@ -125,7 +191,8 @@ def _draw_bubbles(
     # 贴着屏幕上边缘时改从身体下半部出发，泡泡才有地方升起来。
     exit_off = BUBBLE_EXIT_OFFSET_LOW if low else BUBBLE_EXIT_OFFSET
     cy = (SPRITE_CY + exit_off) * k
-    x0 = cx + direction * (SPRITE_BASE_W * 0.62) * k
+    # 从身体外缘再往外留 16 像素，自定义图片大小不同也不会压在身体上
+    x0 = cx + direction * (body_w * 0.5 + 16.0) * k
     span = 20.0 * k
     rise = BUBBLE_RISE * k
     # 所有泡泡用同一个周期、相位均匀铺开：彼此始终等距，不会叠在一起
@@ -213,16 +280,15 @@ def draw_sprite_frame(
 
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
+    bw, bh = _display_size(sprite, hover)
 
     # 泡泡先画在底层：从伞盖后面淡入，再露出身体轮廓
     if state in RUNNING_STATES and bubble_dir:
         ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        _draw_bubbles(ov, k, t, bubble_dir, bubble_low)
+        _draw_bubbles(ov, k, t, bubble_dir, bubble_low, bw)
         img.alpha_composite(ov)
 
     bob = math.sin(t * 1.7) * 2.0
-    bw = SPRITE_BASE_W * (1.045 if hover else 1.0)
-    bh = bw * sprite.height / sprite.width
     tw = max(1, int(round(bw * k)))
     th = max(1, int(round(bh * k)))
     sp = _scaled_sprite(tw, th)
@@ -230,10 +296,11 @@ def draw_sprite_frame(
         if body_hidden:
             cut = max(1, int(round(sp.height * SPRITE_HEAD_FRAC)))
             sp = sp.crop((0, 0, sp.width, cut))
-        elif hang_sway:
+        elif hang_sway and not is_custom_sprite():
+            # 触手晃动只对默认水母有意义，自定义图片保持原样
             sp = _sway_tentacles(sp, t, k)
         cx = JELLY_CX * k
-        cy = (SPRITE_CY + bob) * k
+        cy = (_sprite_cy() + bob) * k
         img.alpha_composite(sp, (int(round(cx - tw / 2.0)), int(round(cy - th / 2.0))))
 
     # ---- 状态灯 ----
@@ -241,8 +308,13 @@ def draw_sprite_frame(
     if state in ("launching", "error"):
         dot = (242, 173, 74, 255) if state == "launching" else (222, 92, 82, 255)
         side = bubble_dir if bubble_dir else 1
-        dot_x = (JELLY_CX + side * (SPRITE_BASE_W / 2.0 - 5.0)) * k
-        dot_y = (SPRITE_CY - bh / 2.0 + 6.0) * k
+        if is_custom_sprite():
+            # 自定义图片是矩形照片，指示灯放到图片外侧，避免压在图上
+            dot_x = (JELLY_CX + side * (bw / 2.0 + 4.0)) * k
+            dot_y = max(8.0, _sprite_cy() - bh / 2.0 + 8.0) * k
+        else:
+            dot_x = (JELLY_CX + side * (bw / 2.0 - 5.0)) * k
+            dot_y = (SPRITE_CY - bh / 2.0 + 6.0) * k
         r1 = 3.6 * k
         r2 = 2.4 * k
         d.ellipse([dot_x - r1, dot_y - r1, dot_x + r1, dot_y + r1],
@@ -514,10 +586,10 @@ def head_rect(scale: float) -> tuple[float, float, float, float]:
     """脑袋（伞盖）在窗口坐标里的大致矩形。"""
     sprite = _load_sprite()
     if sprite is not None:
-        tw = SPRITE_BASE_W * scale
-        th = tw * sprite.height / sprite.width
+        bw, bh = _display_size(sprite, False)
+        tw, th = bw * scale, bh * scale
         cx = JELLY_CX * scale
-        cy = SPRITE_CY * scale
+        cy = _sprite_cy() * scale
         return (
             cx - tw / 2.0, cy - th / 2.0,
             cx + tw / 2.0, cy - th / 2.0 + th * SPRITE_HEAD_FRAC,
@@ -535,10 +607,10 @@ def body_rect(scale: float) -> tuple[float, float, float, float]:
     """
     sprite = _load_sprite()
     if sprite is not None:
-        tw = SPRITE_BASE_W * scale
-        th = tw * sprite.height / sprite.width
+        bw, bh = _display_size(sprite, False)
+        tw, th = bw * scale, bh * scale
         cx = JELLY_CX * scale
-        cy = SPRITE_CY * scale
+        cy = _sprite_cy() * scale
         return (cx - tw / 2.0, cy - th / 2.0, cx + tw / 2.0, cy + th / 2.0)
     cx = JELLY_CX * scale
     cy = 88.0 * scale

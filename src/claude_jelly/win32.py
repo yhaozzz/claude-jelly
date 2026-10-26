@@ -52,6 +52,11 @@ TPM_RIGHTBUTTON = 0x0002
 TPM_RETURNCMD = 0x0100
 TPM_NONOTIFY = 0x0080
 
+OFN_FILEMUSTEXIST = 0x00001000
+OFN_PATHMUSTEXIST = 0x00000800
+OFN_EXPLORER = 0x00080000
+OFN_NOCHANGEDIR = 0x00000008
+
 
 ULW_ALPHA = 0x00000002
 AC_SRC_OVER = 0x00
@@ -74,6 +79,7 @@ WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, HWND, ctypes.c_ssize_t)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
 
 
 class WNDCLASSEXW(ctypes.Structure):
@@ -124,6 +130,68 @@ class BLENDFUNCTION(ctypes.Structure):
 
 class SIZE(ctypes.Structure):
     _fields_ = [("cx", wt.LONG), ("cy", wt.LONG)]
+
+
+class OPENFILENAMEW(ctypes.Structure):
+    _fields_ = [
+        ("lStructSize", wt.DWORD),
+        ("hwndOwner", HWND),
+        ("hInstance", HINSTANCE),
+        ("lpstrFilter", wt.LPCWSTR),
+        ("lpstrCustomFilter", wt.LPWSTR),
+        ("nMaxCustFilter", wt.DWORD),
+        ("nFilterIndex", wt.DWORD),
+        ("lpstrFile", wt.LPWSTR),
+        ("nMaxFile", wt.DWORD),
+        ("lpstrFileTitle", wt.LPWSTR),
+        ("nMaxFileTitle", wt.DWORD),
+        ("lpstrInitialDir", wt.LPCWSTR),
+        ("lpstrTitle", wt.LPCWSTR),
+        ("Flags", wt.DWORD),
+        ("nFileOffset", wt.WORD),
+        ("nFileExtension", wt.WORD),
+        ("lpstrDefExt", wt.LPCWSTR),
+        ("lCustData", wt.LPARAM),
+        ("lpfnHook", ctypes.c_void_p),
+        ("lpTemplateName", wt.LPCWSTR),
+        ("pvReserved", ctypes.c_void_p),
+        ("dwReserved", wt.DWORD),
+        ("FlagsEx", wt.DWORD),
+    ]
+
+
+def _wide_buffer(text: str, extra: int = 1) -> ctypes.Array:
+    """带内嵌 NUL 的宽字符缓冲区（LPWSTR 赋值会在第一个 NUL 截断）。"""
+    buf = ctypes.create_unicode_buffer(len(text) + extra)
+    for i, ch in enumerate(text):
+        buf[i] = ch
+    return buf
+
+
+def pick_image_file(
+    owner: int = 0, title: str = "选择图片", initial_dir: str = ""
+) -> str:
+    """弹出系统文件选择框，返回选中的图片路径；用户取消时返回空串。"""
+    file_buf = ctypes.create_unicode_buffer(32768)
+    filter_buf = _wide_buffer(
+        "图片文件\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp\0"
+        "所有文件\0*.*\0"
+    )
+    ofn = OPENFILENAMEW()
+    ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
+    ofn.hwndOwner = owner
+    ofn.lpstrFilter = ctypes.cast(filter_buf, wt.LPCWSTR)
+    ofn.lpstrFile = ctypes.cast(file_buf, wt.LPWSTR)
+    ofn.nMaxFile = len(file_buf)
+    ofn.lpstrInitialDir = initial_dir or None
+    ofn.lpstrTitle = title
+    ofn.lpstrDefExt = "png"
+    ofn.Flags = (
+        OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR
+    )
+    if not comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+        return ""
+    return file_buf.value
 
 
 def _setup_win32() -> None:
@@ -263,6 +331,9 @@ def _setup_win32() -> None:
     k.GetCurrentThreadId.restype = wt.DWORD
     k.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, ctypes.c_wchar_p]
     k.CreateMutexW.restype = ctypes.c_void_p
+
+    comdlg32.GetOpenFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
+    comdlg32.GetOpenFileNameW.restype = wt.BOOL
 
 
 _setup_win32()

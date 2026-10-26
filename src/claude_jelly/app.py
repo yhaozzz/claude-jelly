@@ -62,6 +62,7 @@ from .render import (
     draw_frame,
     head_rect,
     premultiplied_bgra,
+    set_sprite_image,
 )
 from .win32 import (
     AC_SRC_ALPHA,
@@ -116,6 +117,7 @@ from .win32 import (
     WS_POPUP,
     gdi32,
     kernel32,
+    pick_image_file,
     user32,
 )
 
@@ -165,6 +167,16 @@ class JellyApp:
                     "model": model,
                     "api_key": token,
                 }
+        # ---- 悬浮形象：默认水母 / 用户自选图片 ----
+        self.sprite_path = ""
+        saved_sprite = self.cfg.get("sprite")
+        if isinstance(saved_sprite, str) and saved_sprite:
+            if Path(saved_sprite).is_file() and set_sprite_image(saved_sprite):
+                self.sprite_path = saved_sprite
+                log(f"sprite={saved_sprite}")
+            else:
+                log(f"sprite missing: {saved_sprite}")
+
         self.show_tip = bool(self.cfg.get("show_tip", False))
         self.scale = self.dpi_scale * self.size_factor
         self.pw = max(1, int(round(BASE_W * self.scale)))
@@ -945,6 +957,45 @@ class JellyApp:
         save_config(self.cfg)
         self._render()
 
+    def _apply_sprite(self, path: str | None) -> bool:
+        """切换悬浮形象：path=None 恢复默认水母，返回是否成功。"""
+        if not set_sprite_image(path):
+            return False
+        self.sprite_path = str(path) if path else ""
+        self.cfg["sprite"] = self.sprite_path
+        save_config(self.cfg)
+        # 图片宽高比可能不同，重新校正位置，避免脑袋出屏 / 躲藏错位
+        self.anim_target = None
+        if self.dock_edge:
+            self.pos = list(
+                self._dock_pos(self.dock_edge, revealed=self.reveal)
+            )
+        else:
+            self.pos[0], self.pos[1] = clamp_head(
+                self.pos[0], self.pos[1], self._head_rect()
+            )
+        user32.SetWindowPos(
+            self.hwnd, None, self.pos[0], self.pos[1], self.pw, self.ph,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+        self._render()
+        log(f"sprite={self.sprite_path or '<default>'}")
+        return True
+
+    def _pick_sprite(self) -> None:
+        initial = str(Path(self.sprite_path).parent) if self.sprite_path else ""
+        path = pick_image_file(self.hwnd, "选择悬浮图片", initial)
+        if not path:
+            return
+        if not self._apply_sprite(path):
+            # MB_ICONWARNING
+            user32.MessageBoxW(
+                self.hwnd,
+                "这个文件无法作为图片打开。\n"
+                "支持 PNG / JPG / GIF / BMP / WebP。",
+                APP_NAME, 0x30,
+            )
+
     def _toggle_tip(self) -> None:
         self.show_tip = not self.show_tip
         self.cfg["show_tip"] = self.show_tip
@@ -969,6 +1020,7 @@ class JellyApp:
         size_menu = user32.CreatePopupMenu()
         opacity_menu = user32.CreatePopupMenu()
         float_menu = user32.CreatePopupMenu()
+        sprite_menu = user32.CreatePopupMenu()
         settings_menu = user32.CreatePopupMenu()
         provider_menu = user32.CreatePopupMenu()
         try:
@@ -1009,6 +1061,14 @@ class JellyApp:
                 user32.AppendMenuW(float_menu, flags, 400 + i,
                                    FLOAT_LABELS[i])
             user32.AppendMenuW(menu, MF_POPUP, float_menu, "浮动频率")
+
+            user32.AppendMenuW(sprite_menu, MF_STRING, 600, "选择图片…")
+            user32.AppendMenuW(
+                sprite_menu,
+                MF_STRING | (MF_GRAYED if not self.sprite_path else 0),
+                601, "恢复默认水母",
+            )
+            user32.AppendMenuW(menu, MF_POPUP, sprite_menu, "悬浮图片")
 
             for i, name in enumerate(PROVIDER_ORDER):
                 flags = MF_STRING
@@ -1073,6 +1133,10 @@ class JellyApp:
             self._apply_opacity(OPACITY_PRESETS[cmd - 300])
         elif 400 <= cmd < 400 + len(FLOAT_PRESETS):
             self._apply_float(FLOAT_PRESETS[cmd - 400])
+        elif cmd == 600:
+            self._pick_sprite()
+        elif cmd == 601:
+            self._apply_sprite(None)
         elif 500 <= cmd < 500 + len(PROVIDER_ORDER):
             self._select_provider(PROVIDER_ORDER[cmd - 500])
         elif cmd == 510:

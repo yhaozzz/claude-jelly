@@ -6,6 +6,7 @@ import ctypes.wintypes as wt
 
 WM_DESTROY = 0x0002
 WM_CLOSE = 0x0010
+WM_QUIT = 0x0012
 WM_ERASEBKGND = 0x0014
 WM_NCHITTEST = 0x0084
 WM_MOUSEMOVE = 0x0200
@@ -64,6 +65,11 @@ AC_SRC_ALPHA = 0x01
 SPI_GETWORKAREA = 0x0030
 ERROR_ALREADY_EXISTS = 183
 
+# 消息循环 / 动画计时
+PM_REMOVE = 0x0001
+QS_ALLINPUT = 0x04FF
+MWMO_INPUTAVAILABLE = 0x0004
+
 HWND = ctypes.c_void_p
 HDC = ctypes.c_void_p
 HANDLE = ctypes.c_void_p
@@ -80,6 +86,13 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 comdlg32 = ctypes.WinDLL("comdlg32", use_last_error=True)
+winmm = ctypes.WinDLL("winmm")
+
+# 把系统计时精度调到 1ms，否则短等待会被四舍五入到 ~15.6ms，帧间隔就不稳
+winmm.timeBeginPeriod.argtypes = [ctypes.c_uint]
+winmm.timeBeginPeriod.restype = ctypes.c_uint
+winmm.timeEndPeriod.argtypes = [ctypes.c_uint]
+winmm.timeEndPeriod.restype = ctypes.c_uint
 
 
 class WNDCLASSEXW(ctypes.Structure):
@@ -214,6 +227,14 @@ def _setup_win32() -> None:
 
     u.GetMessageW.argtypes = [ctypes.POINTER(wt.MSG), HWND, ctypes.c_uint, ctypes.c_uint]
     u.GetMessageW.restype = ctypes.c_int
+    u.PeekMessageW.argtypes = [
+        ctypes.POINTER(wt.MSG), HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint
+    ]
+    u.PeekMessageW.restype = wt.BOOL
+    u.MsgWaitForMultipleObjectsEx.argtypes = [
+        wt.DWORD, ctypes.c_void_p, wt.DWORD, wt.DWORD, wt.DWORD
+    ]
+    u.MsgWaitForMultipleObjectsEx.restype = wt.DWORD
     u.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
     u.TranslateMessage.restype = wt.BOOL
     u.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]

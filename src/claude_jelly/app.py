@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import math
 import os
 import subprocess
 import sys
@@ -84,6 +85,9 @@ from .win32 import (
     MOD_ALT,
     MOD_CONTROL,
     MOD_NOREPEAT,
+    MWMO_INPUTAVAILABLE,
+    PM_REMOVE,
+    QS_ALLINPUT,
     SIZE,
     SW_HIDE,
     SW_RESTORE,
@@ -107,6 +111,7 @@ from .win32 import (
     WM_MOUSEMOVE,
     WM_NCHITTEST,
     WM_NULL,
+    WM_QUIT,
     WM_RBUTTONUP,
     WM_TIMER,
     WNDCLASSEXW,
@@ -119,12 +124,23 @@ from .win32 import (
     kernel32,
     pick_image_file,
     user32,
+    winmm,
 )
 
 SIZE_PRESETS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2)
 OPACITY_PRESETS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0)
 FLOAT_PRESETS = (0.0, 0.5, 1.0, 2.0)
 FLOAT_LABELS = ("静止", "慢", "正常", "快")
+
+# 动画刷新间隔（毫秒）：16ms ≈ 60 FPS，配合 winmm.timeBeginPeriod(1) 才不会被系统拉长
+FRAME_MS = 16
+# 兜底定时器：右键菜单 / 文件对话框会自己跑消息循环，主循环被挡住时靠它补帧
+FALLBACK_TIMER_MS = 100
+FALLBACK_TICK_GAP = 0.05
+# 缓动的时间常数（秒）。和帧率无关，所以调高帧率不会让动画变快/变慢
+HOVER_IN_TAU = 0.07    # 悬停淡入：快一点，点了就有反应
+HOVER_OUT_TAU = 0.16   # 离开淡出：慢一点，不闪
+MOVE_TAU = 0.093       # 贴边 / 探出时的位移
 
 
 class JellyApp:
@@ -224,6 +240,8 @@ class JellyApp:
         self.tip_rect: tuple[int, int, int, int] | None = None
 
         self.t0 = time.monotonic()
+        self.last_tick = self.t0
+        self.frame_sig: tuple | None = None
         self.hover = False
         self.vis_alpha = 255.0 * self.idle_opacity
         self.hover_since = 0.0
@@ -284,7 +302,7 @@ class JellyApp:
         self._ensure_dib(self.pw, self.ph)
         self._render()
         user32.ShowWindow(self.hwnd, SW_SHOWNA)
-        user32.SetTimer(self.hwnd, 1, 40, None)
+        user32.SetTimer(self.hwnd, 1, FALLBACK_TIMER_MS, None)
 
         ok = user32.RegisterHotKey(
             self.hwnd, HOTKEY_ID,
@@ -294,9 +312,29 @@ class JellyApp:
 
     def run(self) -> None:
         msg = wt.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
+        interval = FRAME_MS / 1000.0
+        next_tick = time.monotonic() + interval
+        while True:
+            # 用等待超时来计时，不用 WM_TIMER：Windows 会把短间隔的 SetTimer
+            # 合并到 ~15.6ms 的边界上，16ms 的定时器实际只有 ~31ms 才触发一次
+            timeout = next_tick - time.monotonic()
+            if timeout > 0:
+                user32.MsgWaitForMultipleObjectsEx(
+                    0, None, int(timeout * 1000.0) + 1, QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                )
+            else:
+                self._tick()
+                now = time.monotonic()
+                next_tick += interval
+                if next_tick <= now:
+                    # 掉帧了：重新对齐，别连着补好几帧
+                    next_tick = now + interval
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+                if msg.message == WM_QUIT:
+                    return
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
 
     # ---------------- 绘制/合成 ----------------
     def _ensure_dib(self, w: int, h: int) -> None:
@@ -372,13 +410,25 @@ class JellyApp:
         state = self._state()
         # 贴在上边缘：不吐泡泡，改成挂着晃触手（Claude Code 在运行时才晃）
         hanging = self.dock_edge == "top"
+        tip_on = self.tip_shown and self.show_tip
+        tip_text = self._tip_text(state)
+        body_hidden = self.hidden and not hanging
+        bubble_dir = 0 if hanging else self._focus_side()
+        bubble_low = self._bubble_low()
+        hang_sway = hanging and state in RUNNING_STATES
+        # 画面完全没变化时不必重画（比如“静止”悬浮速度下）：
+        # 省 CPU，也避免同一帧反复交给 UpdateLayeredWindow
+        sig = (
+            round(t, 4), state, self.hover, tip_on, tip_text, body_hidden,
+            bubble_dir, bubble_low, hang_sway, self.vis_alpha,
+            self.pos[0], self.pos[1], self.scale, self.sprite_path,
+        )
+        if sig == self.frame_sig:
+            return
+        self.frame_sig = sig
         img, tip_rect = draw_frame(
-            self.scale, t, self.hover, self.tip_shown and self.show_tip,
-            self._tip_text(state), state,
-            self.hidden and not hanging,
-            0 if hanging else self._focus_side(),
-            self._bubble_low(),
-            hanging and state in RUNNING_STATES,
+            self.scale, t, self.hover, tip_on, tip_text, state,
+            body_hidden, bubble_dir, bubble_low, hang_sway,
         )
         img = self._clip_to_work_area(img)
         if img.size != (self.dib_w, self.dib_h):
@@ -491,7 +541,7 @@ class JellyApp:
             int(x), int(y), 0, 0, SWP_NOSIZE | SWP_NOACTIVATE,
         )
 
-    def _step_anim(self) -> None:
+    def _step_anim(self, dt: float) -> None:
         if self.anim_target is None or self.dragging:
             return
         tx, ty = self.anim_target
@@ -501,8 +551,12 @@ class JellyApp:
             self.anim_target = None
             self._move_window(tx, ty)
             return
-        nx = int(round(x + (tx - x) * 0.35))
-        ny = int(round(y + (ty - y) * 0.35))
+        f = 1.0 - math.exp(-dt / MOVE_TAU)
+        # 每帧至少挪 1 像素：高帧率下步长变小，round 会把最后几像素的小数步抹成 0，
+        # 窗口就永远差几个像素到不了目标，anim_target 也清不掉
+        sx = int(round((tx - x) * f)) or (1 if tx > x else (-1 if tx < x else 0))
+        sy = int(round((ty - y) * f)) or (1 if ty > y else (-1 if ty < y else 0))
+        nx, ny = x + sx, y + sy
         self.pos = [nx, ny]
         self._move_window(nx, ny)
 
@@ -898,6 +952,9 @@ class JellyApp:
             self.tip_shown = True
 
     def _tick(self) -> None:
+        now = time.monotonic()
+        dt = min(0.1, max(0.0, now - self.last_tick))
+        self.last_tick = now
         h = self.term_hwnd
         if h and not user32.IsWindow(h):
             self.term_hwnd = 0
@@ -909,9 +966,10 @@ class JellyApp:
             log("auto-collapse on minimize")
         self._update_hover()
         self._update_dock()
-        self._step_anim()
+        self._step_anim(dt)
         target = 255.0 if self.hover else 255.0 * self.idle_opacity
-        self.vis_alpha += (target - self.vis_alpha) * 0.28
+        tau = HOVER_IN_TAU if target > self.vis_alpha else HOVER_OUT_TAU
+        self.vis_alpha += (target - self.vis_alpha) * (1.0 - math.exp(-dt / tau))
         if abs(target - self.vis_alpha) < 1.0:
             self.vis_alpha = target
         self._render()
@@ -1223,7 +1281,9 @@ class JellyApp:
                 return 0
 
             if msg == WM_TIMER:
-                self._tick()
+                # 正常时主循环每 16ms tick 一次，这里只在被模态循环挡住时才补一帧
+                if time.monotonic() - self.last_tick >= FALLBACK_TICK_GAP:
+                    self._tick()
                 return 0
 
             if msg == WM_HOTKEY:
@@ -1320,9 +1380,14 @@ def main() -> None:
     if not _single_instance_guard():
         return
 
-    app = JellyApp()
-    log(f"started pid={os.getpid()} scale={app.scale} claude={CLAUDE} wt={WT}")
-    app.run()
+    # 1ms 计时精度：消息循环的等待超时才准，16ms 一帧才能真正跑到 ~60FPS
+    winmm.timeBeginPeriod(1)
+    try:
+        app = JellyApp()
+        log(f"started pid={os.getpid()} scale={app.scale} claude={CLAUDE} wt={WT}")
+        app.run()
+    finally:
+        winmm.timeEndPeriod(1)
 
 
 def preview_cli() -> None:

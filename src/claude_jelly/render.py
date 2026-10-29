@@ -43,12 +43,14 @@ def vertical_gradient(w: int, h: int, top: tuple, bottom: tuple) -> Image.Image:
 
 
 def premultiplied_bgra(img: Image.Image) -> bytes:
-    arr = np.asarray(img.convert("RGBA"), dtype=np.uint8)
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    arr = np.asarray(img, dtype=np.uint8)
     a = arr[:, :, 3].astype(np.uint16)
     out = np.empty_like(arr)
-    out[:, :, 0] = (arr[:, :, 2].astype(np.uint16) * a // 255).astype(np.uint8)
-    out[:, :, 1] = (arr[:, :, 1].astype(np.uint16) * a // 255).astype(np.uint8)
-    out[:, :, 2] = (arr[:, :, 0].astype(np.uint16) * a // 255).astype(np.uint8)
+    out[:, :, 0] = arr[:, :, 2] * a // 255
+    out[:, :, 1] = arr[:, :, 1] * a // 255
+    out[:, :, 2] = arr[:, :, 0] * a // 255
     out[:, :, 3] = arr[:, :, 3]
     return out.tobytes()
 

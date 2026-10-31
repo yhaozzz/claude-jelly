@@ -1,4 +1,4 @@
-"""悬浮水母窗口：窗口过程、交互菜单与启动逻辑。"""
+"""JellyApp：组装窗口、绘制、终端会话与交互状态。"""
 from __future__ import annotations
 
 import ctypes
@@ -7,100 +7,79 @@ import math
 import os
 import subprocess
 import sys
-import threading
 import time
 import traceback
 from pathlib import Path
 
-import numpy as np
-from PIL import Image
-
-from .core import (
+from .config import (
     APP_NAME,
     CLAUDE,
     CONFIG_PATH,
     LOCAL_DIR,
-    TERM_TITLE,
-    WINDOW_CLASS,
-    WINDOW_TITLE,
     WT,
-    clamp_head,
-    enable_dpi_awareness,
-    force_foreground,
-    is_terminal_window,
-    list_terminal_windows,
     load_config,
     log,
     save_config,
-    set_autostart,
-    shortcut_exists,
-    work_area,
 )
-from .providers import (
+from .controllers import docking
+from .controllers.terminal import TerminalSession
+from .services.autostart import set_autostart, shortcut_exists
+from .services.providers import (
     PROVIDER_DEFAULTS,
-    PROVIDER_LABELS,
     PROVIDER_ORDER,
-    bat_value,
     provider_values,
     read_claude_env,
-    write_launch_script,
 )
-from .render import (
+from .ui.menu import (
+    CMD_AUTOSTART,
+    CMD_CONTINUE,
+    CMD_EDIT_PROVIDER,
+    CMD_FLOAT,
+    CMD_OPACITY,
+    CMD_OPEN_CONFIG,
+    CMD_PICK_SPRITE,
+    CMD_PROVIDER,
+    CMD_QUIT,
+    CMD_RESET_SPRITE,
+    CMD_RESTART,
+    CMD_SIZE,
+    CMD_TIP,
+    CMD_TOGGLE,
+    CMD_TOPMOST,
+    FLOAT_PRESETS,
+    OPACITY_PRESETS,
+    SIZE_PRESETS,
+    MenuState,
+    show_context_menu,
+)
+from .ui.provider_dialog import prompt_provider_config
+from .ui.render import (
     BASE_H,
     BASE_W,
     BUBBLE_EXIT_OFFSET,
     BUBBLE_PAD,
     BUBBLE_RISE,
-    EDGE_PEEK,
-    EDGE_PEEK_SIDE,
-    EDGE_PEEK_TOP,
-    EDGE_SNAP_RADIUS,
-    REDOCK_DELAY,
     RUNNING_STATES,
     SPRITE_CY,
     body_rect,
     clear_sprite_cache,
     draw_frame,
     head_rect,
-    premultiplied_bgra,
     set_sprite_image,
 )
-from .win32 import (
-    AC_SRC_ALPHA,
-    AC_SRC_OVER,
-    BITMAPINFO,
-    BITMAPINFOHEADER,
-    BLENDFUNCTION,
+from .ui.render.preview import preview
+from .ui.window import LayeredWindow, clip_to_work_area
+from .winapi.bindings import (
     ERROR_ALREADY_EXISTS,
     HOTKEY_ID,
     HTCLIENT,
     HTTRANSPARENT,
-    HWND_NOTOPMOST,
-    HWND_TOPMOST,
-    MF_CHECKED,
-    MF_GRAYED,
-    MF_POPUP,
-    MF_SEPARATOR,
-    MF_STRING,
     MOD_ALT,
     MOD_CONTROL,
     MOD_NOREPEAT,
     MWMO_INPUTAVAILABLE,
     PM_REMOVE,
     QS_ALLINPUT,
-    SIZE,
-    SW_HIDE,
-    SW_RESTORE,
-    SW_SHOW,
-    SW_SHOWNA,
-    SWP_NOACTIVATE,
-    SWP_NOMOVE,
-    SWP_NOSIZE,
-    SWP_NOZORDER,
-    TPM_NONOTIFY,
-    TPM_RETURNCMD,
-    TPM_RIGHTBUTTON,
-    ULW_ALPHA,
     WM_APP_LAUNCHED,
     WM_CLOSE,
     WM_DESTROY,
@@ -110,27 +89,15 @@ from .win32 import (
     WM_LBUTTONUP,
     WM_MOUSEMOVE,
     WM_NCHITTEST,
-    WM_NULL,
     WM_QUIT,
     WM_RBUTTONUP,
     WM_TIMER,
-    WNDCLASSEXW,
-    WNDPROC,
-    WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST,
-    WS_POPUP,
-    gdi32,
     kernel32,
-    pick_image_file,
     user32,
     winmm,
 )
-
-SIZE_PRESETS = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2)
-OPACITY_PRESETS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0)
-FLOAT_PRESETS = (0.0, 0.5, 1.0, 2.0)
-FLOAT_LABELS = ("静止", "慢", "正常", "快")
+from .winapi.dialogs import pick_image_file
+from .winapi.screen import clamp_head, enable_dpi_awareness, work_area
 
 # 动画刷新间隔（毫秒）：16ms ≈ 60 FPS，配合 winmm.timeBeginPeriod(1) 才不会被系统拉长
 FRAME_MS = 16
@@ -140,7 +107,6 @@ FALLBACK_TICK_GAP = 0.05
 # 缓动的时间常数（秒）。和帧率无关，所以调高帧率不会让动画变快/变慢
 HOVER_IN_TAU = 0.07    # 悬停淡入：快一点，点了就有反应
 HOVER_OUT_TAU = 0.16   # 离开淡出：慢一点，不闪
-MOVE_TAU = 0.093       # 贴边 / 探出时的位移
 
 
 class JellyApp:
@@ -228,17 +194,10 @@ class JellyApp:
         if self.dock_edge:
             self.pos = list(self._dock_pos(self.dock_edge, revealed=False))
 
+        # ---- 窗口与绘制状态 ----
+        self.window: LayeredWindow | None = None
         self.hwnd: int = 0
-        self.memdc: int = 0
-        self.dib: int = 0
-        self.dib_bits = ctypes.c_void_p()
-        self.dib_w = 0
-        self.dib_h = 0
-
-        self.img: Image.Image | None = None
-        self.alpha: np.ndarray | None = None
         self.tip_rect: tuple[int, int, int, int] | None = None
-
         self.t0 = time.monotonic()
         self.last_tick = self.t0
         self.frame_sig: tuple | None = None
@@ -251,57 +210,22 @@ class JellyApp:
         self.drag_cursor = (0, 0)
         self.drag_origin = (0, 0)
 
-        # 记住水母打开过的终端窗口（新→旧），关掉当前窗口后能接管另一个
-        self.term_history: list[int] = []
+        # ---- 终端会话 ----
         raw_history = self.cfg.get("term_hwnds", [])
-        if isinstance(raw_history, list):
-            for item in raw_history:
-                try:
-                    h = int(item)
-                except (TypeError, ValueError):
-                    continue
-                if h not in self.term_history and is_terminal_window(h):
-                    self.term_history.append(h)
-        self.term_hwnd: int = self.term_history[0] if self.term_history else 0
-        self.launching = False
-        self.error_until = 0.0
-        self.toggle_msg = user32.RegisterWindowMessageW("ClaudeJelly_Toggle_v1")
-
-        self.wndproc_ref = WNDPROC(self._wndproc)
-        self._register_class()
-        self._create_window()
-
-    # ---------------- 窗口 ----------------
-    def _register_class(self) -> None:
-        hinst = kernel32.GetModuleHandleW(None)
-        wc = WNDCLASSEXW()
-        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-        wc.style = 0
-        wc.lpfnWndProc = self.wndproc_ref
-        wc.hInstance = hinst
-        wc.hCursor = user32.LoadCursorW(None, 32512)  # IDC_ARROW
-        wc.lpszClassName = WINDOW_CLASS
-        if not user32.RegisterClassExW(ctypes.byref(wc)):
-            err = ctypes.get_last_error()
-            if err != 1410:  # ERROR_CLASS_ALREADY_EXISTS
-                log(f"RegisterClassExW failed: {err}")
-
-    def _create_window(self) -> None:
-        ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW
-        if self.topmost:
-            ex |= WS_EX_TOPMOST
-        hinst = kernel32.GetModuleHandleW(None)
-        self.hwnd = user32.CreateWindowExW(
-            ex, WINDOW_CLASS, WINDOW_TITLE, WS_POPUP,
-            self.pos[0], self.pos[1], self.pw, self.ph,
-            None, None, hinst, None,
+        if not isinstance(raw_history, list):
+            raw_history = []
+        self.terminal = TerminalSession(
+            raw_history, self._notify_launched, self._persist_terminal_history
         )
-        if not self.hwnd:
-            raise OSError(f"CreateWindowExW failed: {ctypes.get_last_error()}")
 
-        self._ensure_dib(self.pw, self.ph)
+        self.toggle_msg = user32.RegisterWindowMessageW("ClaudeJelly_Toggle_v1")
+        self.window = LayeredWindow(
+            self._wndproc, (self.pos[0], self.pos[1]),
+            self.pw, self.ph, self.topmost,
+        )
+        self.hwnd = self.window.hwnd
         self._render()
-        user32.ShowWindow(self.hwnd, SW_SHOWNA)
+        self.window.show()
         user32.SetTimer(self.hwnd, 1, FALLBACK_TIMER_MS, None)
 
         ok = user32.RegisterHotKey(
@@ -310,6 +234,7 @@ class JellyApp:
         )
         log(f"hotkey registered: {bool(ok)}")
 
+    # ---------------- 消息循环 ----------------
     def run(self) -> None:
         msg = wt.MSG()
         interval = FRAME_MS / 1000.0
@@ -336,46 +261,9 @@ class JellyApp:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
 
-    # ---------------- 绘制/合成 ----------------
-    def _ensure_dib(self, w: int, h: int) -> None:
-        if self.memdc and self.dib_w == w and self.dib_h == h:
-            return
-        if self.dib:
-            gdi32.DeleteObject(self.dib)
-            self.dib = 0
-        if self.memdc:
-            gdi32.DeleteDC(self.memdc)
-            self.memdc = 0
-
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.bmiHeader.biWidth = w
-        bmi.bmiHeader.biHeight = -h  # top-down
-        bmi.bmiHeader.biPlanes = 1
-        bmi.bmiHeader.biBitCount = 32
-        bmi.bmiHeader.biCompression = 0
-        bits = ctypes.c_void_p()
-        self.memdc = gdi32.CreateCompatibleDC(None)
-        self.dib = gdi32.CreateDIBSection(
-            self.memdc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0
-        )
-        if not self.dib:
-            raise OSError(f"CreateDIBSection failed: {ctypes.get_last_error()}")
-        gdi32.SelectObject(self.memdc, self.dib)
-        self.dib_bits = bits
-        self.dib_w, self.dib_h = w, h
-
+    # ---------------- 状态 ----------------
     def _state(self) -> str:
-        if self.launching:
-            return "launching"
-        if time.monotonic() < self.error_until:
-            return "error"
-        h = self.term_hwnd
-        if h and user32.IsWindow(h):
-            if user32.IsWindowVisible(h) and not user32.IsIconic(h):
-                return "visible"
-            return "hidden"
-        return "none"
+        return self.terminal.state()
 
     def _tip_text(self, state: str) -> str:
         if state == "visible":
@@ -403,6 +291,7 @@ class JellyApp:
         emit_y = self.pos[1] + (SPRITE_CY + BUBBLE_EXIT_OFFSET) * self.scale
         return emit_y < r.top + BUBBLE_RISE * 0.6 * self.scale
 
+    # ---------------- 绘制 ----------------
     def _render(self) -> None:
         if not self.hwnd:
             return
@@ -430,35 +319,12 @@ class JellyApp:
             self.scale, t, self.hover, tip_on, tip_text, state,
             body_hidden, bubble_dir, bubble_low, hang_sway,
         )
-        img = self._clip_to_work_area(img)
-        if img.size != (self.dib_w, self.dib_h):
-            self._ensure_dib(img.width, img.height)
-        self.img = img
-        self.alpha = np.asarray(img.getchannel("A"))
+        img = clip_to_work_area(img, (self.pos[0], self.pos[1]))
         self.tip_rect = tip_rect
-        self._paint(img)
-
-    def _paint(self, img: Image.Image) -> None:
-        data = premultiplied_bgra(img)
-        ctypes.memmove(self.dib_bits, data, len(data))
-        size = SIZE(img.width, img.height)
-        src = wt.POINT(0, 0)
-        const_alpha = max(0, min(255, int(round(self.vis_alpha))))
-        blend = BLENDFUNCTION(AC_SRC_OVER, 0, const_alpha, AC_SRC_ALPHA)
-        ok = user32.UpdateLayeredWindow(
-            self.hwnd, None, None, ctypes.byref(size), self.memdc,
-            ctypes.byref(src), 0, ctypes.byref(blend), ULW_ALPHA,
-        )
-        if not ok:
-            log(f"UpdateLayeredWindow failed: {ctypes.get_last_error()}")
+        self.window.paint(img, self.vis_alpha)
 
     def _alpha_at(self, x: int, y: int) -> int:
-        if self.alpha is None:
-            return 0
-        h, w = self.alpha.shape
-        if 0 <= x < w and 0 <= y < h:
-            return int(self.alpha[y, x])
-        return 0
+        return self.window.alpha_at(x, y)
 
     def _is_hit(self, x: int, y: int) -> bool:
         """鼠标是否落在水母身体上（泡泡不算，避免挡住点击/误触）。"""
@@ -480,85 +346,31 @@ class JellyApp:
 
     def _dock_pos(self, edge: str, revealed: bool) -> tuple[int, int]:
         """计算躲到某条边时的窗口位置（窗口坐标->屏幕）。"""
-        hx0, hy0, hx1, hy1 = self._head_rect()
-        head_w = hx1 - hx0
-        head_h = hy1 - hy0
-        r = work_area()
-        x, y = self.pos
-        if edge in ("left", "right"):
-            peek = max(4.0, EDGE_PEEK_SIDE * head_w)
-            y = max(r.top - hy0, min(y, r.bottom - hy1))
-        else:
-            frac = EDGE_PEEK_TOP if edge == "top" else EDGE_PEEK
-            peek = max(4.0, frac * head_h)
-            x = max(r.left - hx0, min(x, r.right - hx1))
-
-        if edge == "bottom":
-            y = r.bottom + peek - hy1
-            if revealed:
-                x = max(r.left - hx0, min(x, r.right - hx1))
-                y = r.bottom - hy1
-        elif edge == "top":
-            y = r.top - peek - hy0
-            if revealed:
-                x = max(r.left - hx0, min(x, r.right - hx1))
-                y = r.top - hy0
-        elif edge == "left":
-            x = r.left - peek - hx0
-            if revealed:
-                y = max(r.top - hy0, min(y, r.bottom - hy1))
-                x = r.left - hx0
-        else:  # right
-            x = r.right + peek - hx1
-            if revealed:
-                y = max(r.top - hy0, min(y, r.bottom - hy1))
-                x = r.right - hx1
-        return int(round(x)), int(round(y))
+        return docking.dock_pos(
+            edge, (self.pos[0], self.pos[1]), self._head_rect(),
+            work_area(), revealed,
+        )
 
     def _nearest_edge(self) -> str | None:
         """脑袋离哪条边最近；不在吸附半径内则返回 None。"""
-        hx0, hy0, hx1, hy1 = self._head_rect()
-        sx0 = self.pos[0] + hx0
-        sy0 = self.pos[1] + hy0
-        sx1 = self.pos[0] + hx1
-        sy1 = self.pos[1] + hy1
-        r = work_area()
-        dists = {
-            "left": sx0 - r.left,
-            "right": r.right - sx1,
-            "top": sy0 - r.top,
-            "bottom": r.bottom - sy1,
-        }
-        edge = min(dists, key=dists.get)
-        if dists[edge] > EDGE_SNAP_RADIUS * self.dpi_scale:
-            return None
-        return edge
+        return docking.nearest_edge(
+            (self.pos[0], self.pos[1]), self._head_rect(), work_area(),
+            docking.EDGE_SNAP_RADIUS * self.dpi_scale,
+        )
 
     def _move_window(self, x: int, y: int) -> None:
-        user32.SetWindowPos(
-            self.hwnd,
-            HWND_TOPMOST if self.topmost else ctypes.c_void_p(0),
-            int(x), int(y), 0, 0, SWP_NOSIZE | SWP_NOACTIVATE,
-        )
+        self.window.move(x, y, self.topmost)
 
     def _step_anim(self, dt: float) -> None:
         if self.anim_target is None or self.dragging:
             return
-        tx, ty = self.anim_target
-        x, y = self.pos
-        if abs(tx - x) <= 1 and abs(ty - y) <= 1:
-            self.pos = [tx, ty]
+        new_pos, done = docking.ease_towards(
+            (self.pos[0], self.pos[1]), self.anim_target, dt
+        )
+        self.pos = [new_pos[0], new_pos[1]]
+        self._move_window(*self.pos)
+        if done:
             self.anim_target = None
-            self._move_window(tx, ty)
-            return
-        f = 1.0 - math.exp(-dt / MOVE_TAU)
-        # 每帧至少挪 1 像素：高帧率下步长变小，round 会把最后几像素的小数步抹成 0，
-        # 窗口就永远差几个像素到不了目标，anim_target 也清不掉
-        sx = int(round((tx - x) * f)) or (1 if tx > x else (-1 if tx < x else 0))
-        sy = int(round((ty - y) * f)) or (1 if ty > y else (-1 if ty < y else 0))
-        nx, ny = x + sx, y + sy
-        self.pos = [nx, ny]
-        self._move_window(nx, ny)
 
     def _update_dock(self) -> None:
         if self.dragging or self.dock_edge is None:
@@ -576,7 +388,7 @@ class JellyApp:
             if self.hover:
                 self.redock_at = 0.0
             elif self.redock_at == 0.0:
-                self.redock_at = now + REDOCK_DELAY
+                self.redock_at = now + docking.REDOCK_DELAY
             elif now >= self.redock_at:
                 self.reveal = False
                 self.redock_at = 0.0
@@ -585,24 +397,6 @@ class JellyApp:
         # 正在回缩：动画结束就只留脑袋
         if self.anim_target is None:
             self.hidden = True
-
-    def _clip_to_work_area(self, img: Image.Image) -> Image.Image:
-        """把窗口伸出工作区（任务栏区域）的部分裁成透明。"""
-        r = work_area()
-        x0 = r.left - self.pos[0]
-        y0 = r.top - self.pos[1]
-        x1 = r.right - self.pos[0]
-        y1 = r.bottom - self.pos[1]
-        w, h = img.size
-        cx0, cy0 = max(0, min(w, x0)), max(0, min(h, y0))
-        cx1, cy1 = max(0, min(w, x1)), max(0, min(h, y1))
-        if cx0 == 0 and cy0 == 0 and cx1 == w and cy1 == h:
-            return img
-        arr = np.array(img)
-        mask = np.zeros((h, w), dtype=bool)
-        mask[cy0:cy1, cx0:cx1] = True
-        arr[~mask] = 0
-        return Image.fromarray(arr, "RGBA")
 
     def _finish_drag(self) -> None:
         """拖拽结束：靠近边缘就躲起来，否则保持悬浮。"""
@@ -619,7 +413,6 @@ class JellyApp:
         else:
             self.dock_edge = None
             self.anim_target = None
-            self.cfg["dock"] = None
             self.pos[0], self.pos[1] = clamp_head(
                 self.pos[0], self.pos[1], self._head_rect()
             )
@@ -629,225 +422,34 @@ class JellyApp:
         log(f"drag end edge={edge} pos={self.pos}")
         self._render()
 
-    # ---------------- 终端控制 ----------------
-    def _remember_terminal(self, hwnd: int) -> None:
-        """把水母打开过的终端窗口记到最前面并持久化。"""
-        if hwnd <= 0:
-            return
-        self.term_history = [hwnd] + [h for h in self.term_history if h != hwnd]
-        del self.term_history[8:]
-        self.cfg["term_hwnds"] = list(self.term_history)
+    # ---------------- 终端会话 ----------------
+    def _notify_launched(self) -> None:
+        user32.PostMessageW(self.hwnd, WM_APP_LAUNCHED, 0, 0)
+
+    def _persist_terminal_history(self, history: list[int]) -> None:
+        self.cfg["term_hwnds"] = list(history)
         save_config(self.cfg)
 
-    def _adopt_terminal(self) -> bool:
-        """当前终端窗口已经关闭时，接管最近打开且仍然存在的那个。"""
-        before = self.term_hwnd
-        live = [h for h in self.term_history if is_terminal_window(h)]
-        if live != self.term_history:
-            self.term_history = live
-            self.cfg["term_hwnds"] = list(live)
-            save_config(self.cfg)
-        if not self.term_history:
-            return False
-        self.term_hwnd = self.term_history[0]
-        if self.term_hwnd != before:
-            log(f"adopt terminal hwnd={self.term_hwnd}")
-        return True
-
     def _toggle_terminal(self) -> None:
-        if self.launching:
+        if self.terminal.launching:
             return
-        h = self.term_hwnd
-        if not (h and user32.IsWindow(h)):
-            self.term_hwnd = 0
-            if not self._adopt_terminal():
-                self._launch_terminal()
-                self._render()
-                return
-            h = self.term_hwnd
-        if user32.IsWindowVisible(h) and not user32.IsIconic(h):
-            user32.ShowWindow(h, SW_HIDE)
-            log("terminal hidden")
-        else:
-            self._show_terminal()
+        self.terminal.toggle(self.provider, self.provider_cfg)
         self._render()
-
-    def _show_terminal(self) -> None:
-        h = self.term_hwnd
-        if not h or not user32.IsWindow(h):
-            return
-        if user32.IsIconic(h):
-            user32.ShowWindow(h, SW_RESTORE)
-        else:
-            user32.ShowWindow(h, SW_SHOW)
-        force_foreground(h)
-        log("terminal shown")
 
     def _launch_terminal(self, continue_last: bool = False) -> None:
-        if self.launching:
+        if self.terminal.launching:
             return
-        self.launching = True
-        self.error_until = 0.0
-        threading.Thread(
-            target=self._launch_worker, args=(continue_last,), daemon=True
-        ).start()
+        self.terminal.launch(self.provider, self.provider_cfg, continue_last)
         self._render()
 
-    def _launch_worker(self, continue_last: bool) -> None:
-        try:
-            before = {h for h, _ in list_terminal_windows()}
-            script = self._write_launch_script(continue_last)
-            args = [
-                WT, "-w", "new", "--title", TERM_TITLE,
-                "cmd.exe", "/d", "/k", str(script),
-            ]
-            log("launch: " + " ".join(f'"{a}"' if " " in a else a for a in args))
-            log(f"launch provider={self.provider}")
-            subprocess.Popen(
-                args,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            found = 0
-            deadline = time.time() + 12.0
-            while time.time() < deadline and not found:
-                time.sleep(0.15)
-                try:
-                    wins = list_terminal_windows()
-                except Exception:
-                    continue
-                new = [(h, t) for h, t in wins if h not in before]
-                if new:
-                    for h, t in new:
-                        if TERM_TITLE.lower() in t.lower():
-                            found = h
-                            break
-                    if not found:
-                        found = new[-1][0]
-            if found:
-                self.term_hwnd = found
-                self._remember_terminal(found)
-                log(f"terminal found hwnd={found}")
-                user32.PostMessageW(self.hwnd, WM_APP_LAUNCHED, 0, 0)
-            else:
-                log("terminal window not found")
-                self.error_until = time.monotonic() + 4.0
-        except Exception:
-            log("launch failed\n" + traceback.format_exc())
-            self.error_until = time.monotonic() + 4.0
-        finally:
-            self.launching = False
-            try:
-                user32.PostMessageW(self.hwnd, WM_APP_LAUNCHED, 0, 0)
-            except Exception:
-                pass
-
     def _restart_terminal(self) -> None:
-        h = self.term_hwnd
-        if h and user32.IsWindow(h):
-            user32.PostMessageW(h, WM_CLOSE, 0, 0)
-        self.term_hwnd = 0
-        self.launching = False
-        self._launch_terminal()
+        self.terminal.restart(self.provider, self.provider_cfg)
+        self._render()
 
     # ---------------- 大模型接口 ----------------
     def _provider_values(self, provider: str) -> tuple[str, str, str]:
         """返回某个接口的 (接口地址, 模型名称, API Key)。"""
         return provider_values(provider, self.provider_cfg)
-
-    def _write_launch_script(self, continue_last: bool) -> Path:
-        """生成启动脚本，用 --settings 指定本次会话的模型接口。"""
-        return write_launch_script(
-            self.provider, self.provider_cfg, continue_last
-        )
-
-    def _prompt_provider_config(
-        self, provider: str, base_url: str, model: str, api_key: str
-    ) -> dict[str, str] | None:
-        """弹出配置窗口，返回 {base_url, model, api_key}；取消返回 None。"""
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-        except Exception:
-            log("tkinter unavailable\n" + traceback.format_exc())
-            return None
-
-        root = tk.Tk()
-        root.title(f"{APP_NAME} - {PROVIDER_LABELS[provider]}")
-        root.resizable(False, False)
-        root.attributes("-topmost", True)
-
-        url_var = tk.StringVar(value=base_url)
-        model_var = tk.StringVar(value=model)
-        key_var = tk.StringVar(value=api_key)
-        show_key = tk.BooleanVar(value=False)
-        result: dict[str, str] | None = None
-
-        for row, (text, var) in enumerate(
-            (("接口地址", url_var), ("模型名称", model_var))
-        ):
-            pad = (12 if row == 0 else 6, 0)
-            tk.Label(root, text=text).grid(
-                row=row, column=0, sticky="w", padx=12, pady=pad
-            )
-            tk.Entry(root, textvariable=var, width=48).grid(
-                row=row, column=1, padx=12, pady=pad
-            )
-
-        tk.Label(root, text="API Key").grid(
-            row=2, column=0, sticky="w", padx=12, pady=6
-        )
-        key_entry = tk.Entry(root, textvariable=key_var, width=48, show="*")
-        key_entry.grid(row=2, column=1, padx=12, pady=6)
-
-        def toggle_key() -> None:
-            key_entry.configure(show="" if show_key.get() else "*")
-
-        tk.Checkbutton(
-            root, text="显示 API Key", variable=show_key, command=toggle_key
-        ).grid(row=3, column=1, sticky="w", padx=8)
-
-        def on_ok() -> None:
-            nonlocal result
-            url = url_var.get().strip()
-            mdl = model_var.get().strip()
-            key = key_var.get().strip()
-            if not url or not mdl:
-                messagebox.showwarning(
-                    "设置", "接口地址和模型名称不能为空。", parent=root
-                )
-                return
-            try:
-                for value in (url, mdl, key):
-                    bat_value(value)
-            except ValueError as exc:
-                messagebox.showwarning("设置", str(exc), parent=root)
-                return
-            result = {"base_url": url, "model": mdl, "api_key": key}
-            root.destroy()
-
-        buttons = tk.Frame(root)
-        buttons.grid(row=4, column=0, columnspan=2, pady=12)
-        tk.Button(buttons, text="取消", width=10, command=root.destroy).pack(
-            side="right", padx=(8, 12)
-        )
-        tk.Button(buttons, text="保存", width=10, command=on_ok).pack(
-            side="right"
-        )
-
-        root.bind("<Return>", lambda _e: on_ok())
-        root.bind("<Escape>", lambda _e: root.destroy())
-        root.update_idletasks()
-        w, h = root.winfo_width(), root.winfo_height()
-        x = (root.winfo_screenwidth() - w) // 2
-        y = (root.winfo_screenheight() - h) // 2
-        root.geometry(f"+{x}+{y}")
-        root.lift()
-        root.focus_force()
-        root.mainloop()
-        return result
 
     def _select_provider(self, provider: str) -> None:
         if provider not in PROVIDER_ORDER:
@@ -875,7 +477,7 @@ class JellyApp:
                         os.environ.get("ANTHROPIC_AUTH_TOKEN")
                         or claude_env.get("ANTHROPIC_AUTH_TOKEN", "")
                     )
-                conf = self._prompt_provider_config(
+                conf = prompt_provider_config(
                     provider, base_url, model, api_key
                 )
                 if conf is None:
@@ -891,7 +493,7 @@ class JellyApp:
         if self.provider == "default":
             return
         base_url, model, api_key = self._provider_values(self.provider)
-        conf = self._prompt_provider_config(
+        conf = prompt_provider_config(
             self.provider, base_url, model, api_key
         )
         if conf is None:
@@ -922,11 +524,7 @@ class JellyApp:
             self.hidden = False
         nx = self.drag_origin[0] + dx
         ny = self.drag_origin[1] + dy
-        user32.SetWindowPos(
-            self.hwnd,
-            HWND_TOPMOST if self.topmost else ctypes.c_void_p(0),
-            nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE,
-        )
+        self.window.move(nx, ny, self.topmost)
         self.pos = [nx, ny]
 
     def _update_hover(self) -> None:
@@ -955,15 +553,7 @@ class JellyApp:
         now = time.monotonic()
         dt = min(0.1, max(0.0, now - self.last_tick))
         self.last_tick = now
-        h = self.term_hwnd
-        if h and not user32.IsWindow(h):
-            self.term_hwnd = 0
-        if not self.term_hwnd:
-            self._adopt_terminal()
-            h = self.term_hwnd
-        if h and user32.IsWindowVisible(h) and user32.IsIconic(h):
-            user32.ShowWindow(h, SW_HIDE)
-            log("auto-collapse on minimize")
+        self.terminal.poll()
         self._update_hover()
         self._update_dock()
         self._step_anim(dt)
@@ -990,9 +580,8 @@ class JellyApp:
                 self.pos[0], self.pos[1], self._head_rect()
             )
         clear_sprite_cache()
-        user32.SetWindowPos(
-            self.hwnd, None, self.pos[0], self.pos[1], self.pw, self.ph,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+        self.window.set_bounds(
+            self.pos[0], self.pos[1], self.pw, self.ph
         )
         self.cfg["size"] = factor
         save_config(self.cfg)
@@ -1032,9 +621,8 @@ class JellyApp:
             self.pos[0], self.pos[1] = clamp_head(
                 self.pos[0], self.pos[1], self._head_rect()
             )
-        user32.SetWindowPos(
-            self.hwnd, None, self.pos[0], self.pos[1], self.pw, self.ph,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+        self.window.set_bounds(
+            self.pos[0], self.pos[1], self.pw, self.ph
         )
         self._render()
         log(f"sprite={self.sprite_path or '<default>'}")
@@ -1064,142 +652,56 @@ class JellyApp:
 
     def _toggle_topmost(self) -> None:
         self.topmost = not self.topmost
-        user32.SetWindowPos(
-            self.hwnd,
-            HWND_TOPMOST if self.topmost else HWND_NOTOPMOST,
-            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
+        self.window.set_topmost(self.topmost)
         self.cfg["topmost"] = self.topmost
         save_config(self.cfg)
 
+    # ---------------- 右键菜单 ----------------
     def _show_menu(self, sx: int, sy: int) -> None:
-        state = self._state()
-        menu = user32.CreatePopupMenu()
-        size_menu = user32.CreatePopupMenu()
-        opacity_menu = user32.CreatePopupMenu()
-        float_menu = user32.CreatePopupMenu()
-        sprite_menu = user32.CreatePopupMenu()
-        settings_menu = user32.CreatePopupMenu()
-        provider_menu = user32.CreatePopupMenu()
-        try:
-            toggle_label = "收起 Claude Code" if state == "visible" else "打开 Claude Code"
-            user32.AppendMenuW(menu, MF_STRING, 100, toggle_label)
-            user32.AppendMenuW(
-                menu,
-                MF_STRING | (MF_GRAYED if state in ("visible", "hidden") else 0),
-                101, "继续上次会话",
-            )
-            user32.AppendMenuW(
-                menu,
-                MF_STRING | (MF_GRAYED if state not in ("visible", "hidden") else 0),
-                102, "重新开始会话",
-            )
-            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+        state = MenuState(
+            window_state=self._state(),
+            size_factor=self.size_factor,
+            idle_opacity=self.idle_opacity,
+            float_speed=self.float_speed,
+            provider=self.provider,
+            sprite_path=self.sprite_path,
+            topmost=self.topmost,
+            autostart=shortcut_exists(),
+            show_tip=self.show_tip,
+        )
+        cmd = show_context_menu(self.hwnd, sx, sy, state)
+        self._handle_menu_command(cmd)
 
-            for i, v in enumerate(SIZE_PRESETS):
-                flags = MF_STRING
-                if abs(self.size_factor - v) < 0.001:
-                    flags |= MF_CHECKED
-                user32.AppendMenuW(size_menu, flags, 200 + i,
-                                   f"{int(round(v * 100))}%")
-            user32.AppendMenuW(menu, MF_POPUP, size_menu, "大小")
-
-            for i, v in enumerate(OPACITY_PRESETS):
-                flags = MF_STRING
-                if abs(self.idle_opacity - v) < 0.001:
-                    flags |= MF_CHECKED
-                user32.AppendMenuW(opacity_menu, flags, 300 + i,
-                                   f"{int(round(v * 100))}%")
-            user32.AppendMenuW(menu, MF_POPUP, opacity_menu, "透明度")
-
-            for i, speed in enumerate(FLOAT_PRESETS):
-                flags = MF_STRING
-                if abs(self.float_speed - speed) < 0.001:
-                    flags |= MF_CHECKED
-                user32.AppendMenuW(float_menu, flags, 400 + i,
-                                   FLOAT_LABELS[i])
-            user32.AppendMenuW(menu, MF_POPUP, float_menu, "浮动频率")
-
-            user32.AppendMenuW(sprite_menu, MF_STRING, 600, "选择图片…")
-            user32.AppendMenuW(
-                sprite_menu,
-                MF_STRING | (MF_GRAYED if not self.sprite_path else 0),
-                601, "恢复默认水母",
-            )
-            user32.AppendMenuW(menu, MF_POPUP, sprite_menu, "悬浮图片")
-
-            for i, name in enumerate(PROVIDER_ORDER):
-                flags = MF_STRING
-                if self.provider == name:
-                    flags |= MF_CHECKED
-                user32.AppendMenuW(provider_menu, flags, 500 + i,
-                                   PROVIDER_LABELS[name])
-            user32.AppendMenuW(settings_menu, MF_POPUP, provider_menu,
-                               "大模型接口")
-            user32.AppendMenuW(settings_menu, MF_SEPARATOR, 0, None)
-            user32.AppendMenuW(
-                settings_menu,
-                MF_STRING | (MF_GRAYED if self.provider == "default" else 0),
-                510, "接口配置…",
-            )
-            user32.AppendMenuW(settings_menu, MF_STRING, 511, "打开配置文件")
-            user32.AppendMenuW(menu, MF_POPUP, settings_menu, "设置")
-
-            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            user32.AppendMenuW(
-                menu, MF_STRING | (MF_CHECKED if self.topmost else 0),
-                103, "始终置顶",
-            )
-            user32.AppendMenuW(
-                menu, MF_STRING | (MF_CHECKED if shortcut_exists() else 0),
-                104, "开机自启",
-            )
-            user32.AppendMenuW(
-                menu, MF_STRING | (MF_CHECKED if self.show_tip else 0),
-                106, "显示文字提示",
-            )
-            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-            user32.AppendMenuW(menu, MF_STRING, 105, "退出")
-
-            user32.SetForegroundWindow(self.hwnd)
-            cmd = user32.TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-                sx, sy, 0, self.hwnd, None,
-            )
-            user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
-        finally:
-            user32.DestroyMenu(menu)
-
-        if cmd == 100:
+    def _handle_menu_command(self, cmd: int) -> None:
+        if cmd == CMD_TOGGLE:
             self._toggle_terminal()
-        elif cmd == 101:
+        elif cmd == CMD_CONTINUE:
             self._launch_terminal(continue_last=True)
-        elif cmd == 102:
+        elif cmd == CMD_RESTART:
             self._restart_terminal()
-        elif cmd == 103:
+        elif cmd == CMD_TOPMOST:
             self._toggle_topmost()
-        elif cmd == 104:
+        elif cmd == CMD_AUTOSTART:
             set_autostart(not shortcut_exists())
-        elif cmd == 105:
+        elif cmd == CMD_QUIT:
             self._quit()
-        elif cmd == 106:
+        elif cmd == CMD_TIP:
             self._toggle_tip()
-        elif 200 <= cmd < 200 + len(SIZE_PRESETS):
-            self._apply_size(SIZE_PRESETS[cmd - 200])
-        elif 300 <= cmd < 300 + len(OPACITY_PRESETS):
-            self._apply_opacity(OPACITY_PRESETS[cmd - 300])
-        elif 400 <= cmd < 400 + len(FLOAT_PRESETS):
-            self._apply_float(FLOAT_PRESETS[cmd - 400])
-        elif cmd == 600:
+        elif CMD_SIZE <= cmd < CMD_SIZE + len(SIZE_PRESETS):
+            self._apply_size(SIZE_PRESETS[cmd - CMD_SIZE])
+        elif CMD_OPACITY <= cmd < CMD_OPACITY + len(OPACITY_PRESETS):
+            self._apply_opacity(OPACITY_PRESETS[cmd - CMD_OPACITY])
+        elif CMD_FLOAT <= cmd < CMD_FLOAT + len(FLOAT_PRESETS):
+            self._apply_float(FLOAT_PRESETS[cmd - CMD_FLOAT])
+        elif cmd == CMD_PICK_SPRITE:
             self._pick_sprite()
-        elif cmd == 601:
+        elif cmd == CMD_RESET_SPRITE:
             self._apply_sprite(None)
-        elif 500 <= cmd < 500 + len(PROVIDER_ORDER):
-            self._select_provider(PROVIDER_ORDER[cmd - 500])
-        elif cmd == 510:
+        elif CMD_PROVIDER <= cmd < CMD_PROVIDER + len(PROVIDER_ORDER):
+            self._select_provider(PROVIDER_ORDER[cmd - CMD_PROVIDER])
+        elif cmd == CMD_EDIT_PROVIDER:
             self._edit_provider_config()
-        elif cmd == 511:
+        elif cmd == CMD_OPEN_CONFIG:
             self._open_config()
 
     def _quit(self) -> None:
@@ -1216,7 +718,7 @@ class JellyApp:
         self.cfg["show_tip"] = self.show_tip
         save_config(self.cfg)
         user32.UnregisterHotKey(self.hwnd, HOTKEY_ID)
-        user32.DestroyWindow(self.hwnd)
+        self.window.destroy()
 
     # ---------------- 窗口过程 ----------------
     def _wndproc(self, hwnd, msg, wparam, lparam):
@@ -1292,8 +794,8 @@ class JellyApp:
                 return 0
 
             if msg == WM_APP_LAUNCHED:
-                if self.term_hwnd and user32.IsWindow(self.term_hwnd):
-                    self._show_terminal()
+                if self.terminal.hwnd and user32.IsWindow(self.terminal.hwnd):
+                    self.terminal.show()
                 self._render()
                 return 0
 
@@ -1320,7 +822,6 @@ class JellyApp:
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
 
-
 # --------------------------------------------------------------------------
 # 入口
 # --------------------------------------------------------------------------
@@ -1334,38 +835,6 @@ def _single_instance_guard() -> bool:
         return False
     globals()["_MUTEX_HANDLE"] = handle
     return True
-
-
-def preview(args: list[str]) -> None:
-    scale = 2.0
-    if "--scale" in args:
-        try:
-            scale = float(args[args.index("--scale") + 1])
-        except Exception:
-            pass
-    t = 1.37
-    variants = [
-        ("preview_light.png", False, False, "打开 Claude Code", "none", 0),
-        ("preview_hover.png", True, True, "打开 Claude Code", "none", 0),
-        ("preview_active.png", True, True, "收起窗口", "visible", -1),
-        ("preview_bubbles.png", True, True, "收起窗口", "visible", 1),
-    ]
-    out_dir = LOCAL_DIR / "previews"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, hover, tip, text, state, bdir in variants:
-        img, _ = draw_frame(scale, t, hover, tip, text, state, False, bdir)
-        light = Image.new("RGBA", img.size, (238, 239, 242, 255))
-        light.alpha_composite(img)
-        light.convert("RGB").save(out_dir / name)
-    img, _ = draw_frame(scale, t, True, True, "打开 Claude Code", "none")
-    dark = Image.new("RGBA", img.size, (32, 32, 34, 255))
-    dark.alpha_composite(img)
-    dark.convert("RGB").save(out_dir / "preview_dark.png")
-    img, _ = draw_frame(scale, t, False, False, "", "none", True)
-    light = Image.new("RGBA", img.size, (238, 239, 242, 255))
-    light.alpha_composite(img)
-    light.convert("RGB").save(out_dir / "preview_hidden.png")
-    print(f"previews written to {out_dir}")
 
 
 def main() -> None:

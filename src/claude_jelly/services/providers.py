@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .core import CLAUDE, HOME, LOCAL_DIR, TERM_TITLE
+from ..config import CLAUDE, HOME, LOCAL_DIR, TERM_TITLE
 
 PROVIDER_ORDER = ("default", "deepseek", "custom")
 PROVIDER_LABELS = {

@@ -72,19 +72,46 @@ claude-jelly
 
 ```
 claude-jelly/
-├── pyproject.toml          # uv / 打包配置
-├── src/claude_jelly/
-│   ├── __init__.py
-│   ├── __main__.py         # python -m claude_jelly 入口
-│   ├── app.py              # 窗口类、交互、右键菜单
-│   ├── core.py             # 常量、配置读写、系统小工具
-│   ├── providers.py        # 大模型接口配置与启动脚本
-│   ├── render.py           # 水母绘制与边缘躲藏参数
-│   ├── win32.py            # Win32 API 常量与函数签名
-│   └── assets/
-│       └── claude_sprite.png
-└── README.md
+├── pyproject.toml              # uv / 打包配置
+└── src/claude_jelly/
+    ├── __init__.py             # 版本号
+    ├── __main__.py             # python -m / claude-jelly 入口
+    ├── app.py                  # 组装应用、消息循环、交互状态
+    ├── config.py               # 常量、路径、配置读写、日志
+    ├── controllers/            # 与界面无关的状态机
+    │   ├── docking.py          # 边缘吸附 / 躲藏位置 / 缓动
+    │   └── terminal.py         # 终端启动、收起、接管与状态
+    ├── services/               # 本机集成
+    │   ├── autostart.py        # 开机自启快捷方式
+    │   └── providers.py        # Anthropic 兼容接口配置
+    ├── ui/
+    │   ├── window.py           # 分层透明窗口与 DIB 合成
+    │   ├── menu.py             # 右键菜单（只返回命令）
+    │   ├── provider_dialog.py  # 接口配置对话框
+    │   └── render/             # 纯绘制，无窗口依赖
+    │       ├── constants.py    # 尺寸 / 泡泡 / 精灵图常量
+    │       ├── sprite.py       # 形象加载与缩放缓存
+    │       ├── geometry.py     # 脑袋 / 身体矩形
+    │       ├── bubbles.py      # 泡泡粒子
+    │       ├── jelly.py        # 程序化兜底水母
+    │       ├── frame.py        # 帧合成
+    │       ├── util.py         # 字体 / 渐变 / 预乘像素
+    │       └── preview.py      # 预览图生成
+    ├── winapi/                 # 唯一的 ctypes 边界
+    │   ├── bindings.py         # DLL、常量、结构体、函数签名
+    │   ├── screen.py           # DPI / 工作区 / 焦点
+    │   ├── terminals.py        # 终端窗口识别与枚举
+    │   └── dialogs.py          # 系统文件选择框
+    └── assets/
+        └── claude_sprite.png
 ```
+
+分层约定：
+
+- `winapi/` 是唯一直接调用 Win32 / ctypes 的地方；
+- `controllers/` 只做状态与几何计算，不碰窗口和绘制；
+- `ui/render/` 是纯函数式绘制，输入状态输出 RGBA；
+- `app.py` 只负责组装与交互调度，不实现具体能力。
 
 ## 开发
 

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import traceback
 
-from .app import APP_NAME, log, main
-from .win32 import user32
+from .app import main
+from .config import APP_NAME, log
+from .winapi.bindings import user32
 
 
 def _run() -> None:

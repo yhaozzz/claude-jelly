@@ -1,6 +1,6 @@
 [project]
 name = "claude-jelly"
-version = "1.1.0"
+version = "1.2.0"
 description = "桌面悬浮小水母：一键打开 / 收起运行 Claude Code 的 Windows Terminal"
 readme = "README.md"
 requires-python = ">=3.10"

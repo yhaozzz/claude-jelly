@@ -4,7 +4,8 @@ from __future__ import annotations
 import traceback
 
 from ..config import APP_NAME, log
-from ..services.providers import PROVIDER_LABELS, bat_value
+from ..i18n import t
+from ..services.providers import bat_value
 
 
 def prompt_provider_config(
@@ -19,7 +20,7 @@ def prompt_provider_config(
         return None
 
     root = tk.Tk()
-    root.title(f"{APP_NAME} - {PROVIDER_LABELS[provider]}")
+    root.title(f"{APP_NAME} - {t(f'provider.{provider}')}")
     root.resizable(False, False)
     root.attributes("-topmost", True)
 
@@ -30,7 +31,10 @@ def prompt_provider_config(
     result: dict[str, str] | None = None
 
     for row, (text, var) in enumerate(
-        (("接口地址", url_var), ("模型名称", model_var))
+        (
+            (t("dialog.base_url"), url_var),
+            (t("dialog.model"), model_var),
+        )
     ):
         pad = (12 if row == 0 else 6, 0)
         tk.Label(root, text=text).grid(
@@ -50,7 +54,7 @@ def prompt_provider_config(
         key_entry.configure(show="" if show_key.get() else "*")
 
     tk.Checkbutton(
-        root, text="显示 API Key", variable=show_key, command=toggle_key
+        root, text=t("dialog.show_key"), variable=show_key, command=toggle_key
     ).grid(row=3, column=1, sticky="w", padx=8)
 
     def on_ok() -> None:
@@ -60,24 +64,26 @@ def prompt_provider_config(
         key = key_var.get().strip()
         if not url or not mdl:
             messagebox.showwarning(
-                "设置", "接口地址和模型名称不能为空。", parent=root
+                t("menu.settings"), t("dialog.required"), parent=root
             )
             return
         try:
             for value in (url, mdl, key):
                 bat_value(value)
-        except ValueError as exc:
-            messagebox.showwarning("设置", str(exc), parent=root)
+        except ValueError:
+            messagebox.showwarning(
+                t("menu.settings"), t("dialog.invalid_value"), parent=root
+            )
             return
         result = {"base_url": url, "model": mdl, "api_key": key}
         root.destroy()
 
     buttons = tk.Frame(root)
     buttons.grid(row=4, column=0, columnspan=2, pady=12)
-    tk.Button(buttons, text="取消", width=10, command=root.destroy).pack(
+    tk.Button(buttons, text=t("dialog.cancel"), width=10, command=root.destroy).pack(
         side="right", padx=(8, 12)
     )
-    tk.Button(buttons, text="保存", width=10, command=on_ok).pack(
+    tk.Button(buttons, text=t("dialog.save"), width=10, command=on_ok).pack(
         side="right"
     )
 

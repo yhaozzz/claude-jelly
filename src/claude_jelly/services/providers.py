@@ -7,11 +7,6 @@ from pathlib import Path
 from ..config import CLAUDE, HOME, LOCAL_DIR, TERM_TITLE
 
 PROVIDER_ORDER = ("default", "deepseek", "custom")
-PROVIDER_LABELS = {
-    "default": "官方 Claude",
-    "deepseek": "DeepSeek",
-    "custom": "自定义…",
-}
 PROVIDER_DEFAULTS = {
     "deepseek": {
         "base_url": "https://api.deepseek.com/anthropic",

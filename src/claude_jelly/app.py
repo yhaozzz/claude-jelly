@@ -23,6 +23,7 @@ from .config import (
 )
 from .controllers import docking
 from .controllers.terminal import TerminalSession
+from .i18n import DEFAULT_LANGUAGE, LANGUAGE_ORDER, get_language, set_language, t
 from .services.autostart import set_autostart, shortcut_exists
 from .services.providers import (
     PROVIDER_DEFAULTS,
@@ -35,6 +36,7 @@ from .ui.menu import (
     CMD_CONTINUE,
     CMD_EDIT_PROVIDER,
     CMD_FLOAT,
+    CMD_LANGUAGE,
     CMD_OPACITY,
     CMD_OPEN_CONFIG,
     CMD_PICK_SPRITE,
@@ -112,6 +114,7 @@ HOVER_OUT_TAU = 0.16   # 离开淡出：慢一点，不闪
 class JellyApp:
     def __init__(self) -> None:
         self.cfg = load_config()
+        set_language(self.cfg.get("language", DEFAULT_LANGUAGE))
         self.dpi_scale = max(1.0, user32.GetDpiForSystem() / 96.0)
         self.size_factor = min(1.6, max(0.4, float(self.cfg.get("size", 0.7))))
         self.idle_opacity = min(1.0, max(0.1, float(self.cfg.get("opacity", 0.4))))
@@ -267,12 +270,12 @@ class JellyApp:
 
     def _tip_text(self, state: str) -> str:
         if state == "visible":
-            return "收起窗口"
+            return t("tip.hide")
         if state == "launching":
-            return "正在启动…"
+            return t("tip.launching")
         if state == "error":
-            return "启动失败"
-        return "打开 Claude Code"
+            return t("tip.error")
+        return t("tip.open")
 
     def _focus_side(self) -> int:
         """气泡和状态灯朝屏幕内侧的方向：-1 向左，+1 向右。"""
@@ -630,15 +633,20 @@ class JellyApp:
 
     def _pick_sprite(self) -> None:
         initial = str(Path(self.sprite_path).parent) if self.sprite_path else ""
-        path = pick_image_file(self.hwnd, "选择悬浮图片", initial)
+        path = pick_image_file(
+            self.hwnd,
+            t("dialog.pick_sprite"),
+            initial,
+            t("dialog.image_files"),
+            t("dialog.all_files"),
+        )
         if not path:
             return
         if not self._apply_sprite(path):
             # MB_ICONWARNING
             user32.MessageBoxW(
                 self.hwnd,
-                "这个文件无法作为图片打开。\n"
-                "支持 PNG / JPG / GIF / BMP / WebP。",
+                t("dialog.image_error"),
                 APP_NAME, 0x30,
             )
 
@@ -656,6 +664,16 @@ class JellyApp:
         self.cfg["topmost"] = self.topmost
         save_config(self.cfg)
 
+    def _set_language(self, language: str) -> None:
+        if language == get_language():
+            return
+        set_language(language)
+        self.cfg["language"] = get_language()
+        save_config(self.cfg)
+        self.frame_sig = None
+        self._render()
+        log(f"language={get_language()}")
+
     # ---------------- 右键菜单 ----------------
     def _show_menu(self, sx: int, sy: int) -> None:
         state = MenuState(
@@ -668,6 +686,7 @@ class JellyApp:
             topmost=self.topmost,
             autostart=shortcut_exists(),
             show_tip=self.show_tip,
+            language=get_language(),
         )
         cmd = show_context_menu(self.hwnd, sx, sy, state)
         self._handle_menu_command(cmd)
@@ -703,6 +722,8 @@ class JellyApp:
             self._edit_provider_config()
         elif cmd == CMD_OPEN_CONFIG:
             self._open_config()
+        elif CMD_LANGUAGE <= cmd < CMD_LANGUAGE + len(LANGUAGE_ORDER):
+            self._set_language(LANGUAGE_ORDER[cmd - CMD_LANGUAGE])
 
     def _quit(self) -> None:
         if self.dock_edge:

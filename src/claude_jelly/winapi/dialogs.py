@@ -23,13 +23,17 @@ def _wide_buffer(text: str, extra: int = 1) -> ctypes.Array:
 
 
 def pick_image_file(
-    owner: int = 0, title: str = "选择图片", initial_dir: str = ""
+    owner: int = 0,
+    title: str = "Choose image",
+    initial_dir: str = "",
+    image_label: str = "Image files",
+    all_label: str = "All files",
 ) -> str:
     """弹出系统文件选择框，返回选中的图片路径；用户取消时返回空串。"""
     file_buf = ctypes.create_unicode_buffer(32768)
     filter_buf = _wide_buffer(
-        "图片文件\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp\0"
-        "所有文件\0*.*\0"
+        f"{image_label}\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp\0"
+        f"{all_label}\0*.*\0"
     )
     ofn = OPENFILENAMEW()
     ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)

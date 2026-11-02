@@ -1,5 +1,7 @@
 # Claude Jelly 🪼
 
+[English](README.en.md) | 中文
+
 桌面悬浮小水母，用来一键打开 / 收起运行 [Claude Code](https://claude.com/claude-code) 的 Windows Terminal 窗口。
 
 ![Claude Jelly](src/claude_jelly/assets/claude_sprite.png)
@@ -13,7 +15,8 @@
 - **顶边彩蛋**：把水母贴到屏幕上边缘，它会挂在边缘垂下触手轻轻晃（Claude Code 在运行时才晃），不再吐泡泡
 - **终端接管**：关闭当前终端后，水母会自动接管最近由它打开、仍然存在的那个终端，泡泡状态不会因为关错窗口而丢失
 - **自定义悬浮图片**：右键菜单 → 悬浮图片，可选 PNG / JPG / GIF / BMP / WebP 换成任意形象（自动等比缩放，泡泡和躲藏行为照常），随时一键恢复默认水母
-- **右键菜单**：大小、透明度、浮动频率、悬浮图片、开机自启、置顶、大模型接口
+- **显示语言**：右键菜单 → 语言，可在中文 / English 之间切换，选择会保存
+- **右键菜单**：大小、透明度、浮动频率、悬浮图片、显示语言、开机自启、置顶、大模型接口
 - **大模型接口**：在右键菜单 → 设置里选择官方 Claude、DeepSeek 或自定义 Anthropic 兼容接口
 
 ## 环境要求
@@ -46,6 +49,7 @@ claude-jelly
 | 左键单击 | 打开 / 收起终端窗口 |
 | 左键拖动 | 移动水母；靠近屏幕边缘松手会自动躲藏 |
 | 右键 | 打开设置菜单 |
+| 右键 → 语言 | 切换中文 / English |
 | 鼠标悬停 | 显示提示、躲藏状态下探出身体 |
 | `Ctrl+Alt+J` | 全局快捷键，等同单击水母 |
 
@@ -68,6 +72,8 @@ claude-jelly
 | 启动脚本 | `%LOCALAPPDATA%\ClaudeJelly\launch.cmd` |
 | 日志 | `%LOCALAPPDATA%\ClaudeJelly\jelly.log` |
 
+显示语言保存在 `config.json` 的 `language` 字段（`zh` / `en`）。
+
 ## 项目结构
 
 ```
@@ -78,6 +84,7 @@ claude-jelly/
     ├── __main__.py             # python -m / claude-jelly 入口
     ├── app.py                  # 组装应用、消息循环、交互状态
     ├── config.py               # 常量、路径、配置读写、日志
+    ├── i18n.py                 # 中英文案与当前语言
     ├── controllers/            # 与界面无关的状态机
     │   ├── docking.py          # 边缘吸附 / 躲藏位置 / 缓动
     │   └── terminal.py         # 终端启动、收起、接管与状态
